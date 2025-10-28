@@ -646,6 +646,30 @@ function parseDate(dateStr) {
   }
 }
 
+/**
+ * Check if a row's date is within the scanning range (today-7days to future)
+ * Used by scheduled functions to only process recent and upcoming events
+ */
+function isWithinScanningRange(row) {
+  const dateStr = row[1]; // Date is in column B (index 1)
+  if (!dateStr) return false;
+
+  try {
+    const eventDate = parseDate(dateStr);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Start of today
+
+    const sevenDaysAgo = new Date(today);
+    sevenDaysAgo.setDate(today.getDate() - 7); // 7 days ago
+
+    // Return true if event date is from 7 days ago onwards
+    return eventDate >= sevenDaysAgo;
+  } catch (e) {
+    console.log(`Error parsing date "${dateStr}": ${e.message}`);
+    return false;
+  }
+}
+
 
 
 /**
@@ -2368,10 +2392,11 @@ exports.scanAllRowsForUpdates = functions.https.onCall(async (data, context) => 
 
 /**
  * Scheduled version of scanAllRowsForUpdates
- * Runs every 6 hours to ensure all calendar events stay in sync
+ * Runs every 15 minutes to ensure all calendar events stay in sync
+ * Scans events from today-7days to the end of the spreadsheet
  */
 exports.scheduledScanAllRowsForUpdates = onSchedule({
-  schedule: 'every 30 minutes',
+  schedule: 'every 15 minutes',
   region: 'us-central1',
   timeZone: 'Asia/Jerusalem'
 }, async (_context) => {
@@ -2454,14 +2479,20 @@ exports.scheduledScanAllRowsForUpdates = onSchedule({
         
         for (let i = 2; i < allRows.length; i++) {  // Start from row 2 (index 1) to skip header
           const row = allRows[i];
-          
+
           try {
             // Skip empty rows
             if (!row || row.length < 10) {
               skippedRows.push({ row: i, reason: "insufficient data" });
               continue;
             }
-            
+
+            // Skip rows that are outside the scanning range (today-7days to future)
+            if (!isWithinScanningRange(row)) {
+              console.log(`Row ${i} date is outside scanning range (today-7days to future), skipping update check`);
+              continue;
+            }
+
             // Skip rows without event IDs
             if (!row[eventIdColumnIndex]) {
               // Only log this for rows that should have an event ID
@@ -2751,15 +2782,16 @@ async function processBatchUpdates(
 
 /**
  * Scheduled function to sync spreadsheet data with calendar events
- * Runs every 30 minutes to check for new events and updates to existing events
+ * Runs every 15 minutes to check for new events and updates to existing events
+ * Scans events from today-7days to the end of the spreadsheet
  */
 // 1. Replace the existing update functions in scanSheetsAndUpdateCalendar with this:
 
 exports.scanSheetsAndUpdateCalendar = onSchedule({
-  schedule: 'every 30 minutes',
+  schedule: 'every 15 minutes',
   region: 'us-central1',
   timeZone: 'Asia/Jerusalem'
-  
+
 }, async (_context) => {
   try {
     console.log("Starting scheduled sheet scan");
@@ -2821,19 +2853,25 @@ exports.scanSheetsAndUpdateCalendar = onSchedule({
         
         for (let i = lastProcessedRow; i < allRows.length; i++) {
           const row = allRows[i];
-          
+
           try {
             // Skip invalid rows
             if (!isValidRow(row, i)) {
               continue;
             }
-            
+
+            // Skip rows that are outside the scanning range (today-7days to future)
+            if (!isWithinScanningRange(row)) {
+              console.log(`Row ${i} date is outside scanning range (today-7days to future), skipping`);
+              continue;
+            }
+
             // Skip if already processed - will check for updates later
             if (isAlreadyProcessed(row, config)) {
               console.log(`Row ${i} already processed, will check for updates later`);
               continue;
             }
-            
+
             // Skip excluded event types (for new entries only)
             if (isExcludedEventType(row)) {
               console.log(`Skipping row ${i}: Event type "${row[3]}" is excluded`);
