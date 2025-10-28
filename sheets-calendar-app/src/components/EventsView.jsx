@@ -3,7 +3,7 @@ import { getFunctions, httpsCallable } from 'firebase/functions';
 import { FiCalendar, FiPrinter, FiInfo, FiFilter, FiClock, FiMapPin, FiUser, FiUsers, FiChevronLeft, FiChevronRight } from 'react-icons/fi';
 
 // Common component for displaying events across different timeframe views
-function EventsView({ timeframe, title }) {
+function EventsView({ timeframe, title, month, year }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [events, setEvents] = useState([]);
@@ -22,12 +22,19 @@ function EventsView({ timeframe, title }) {
     
     try {
       // Call the Cloud Function directly using Firebase v9 syntax
-      console.log("Calling getTimeframeEvents with timeframe:", timeframe);
+      console.log("Calling getTimeframeEvents with timeframe:", timeframe, "month:", month, "year:", year);
       const getTimeframeEventsFn = httpsCallable(functions, 'getTimeframeEvents');
-      
+
+      // Prepare the function parameters
+      const params = { timeframe };
+      if (month !== undefined && year !== undefined) {
+        params.month = month;
+        params.year = year;
+      }
+
       // Add more detailed logging
-      console.log("Before function call");
-      const result = await getTimeframeEventsFn({ timeframe });
+      console.log("Before function call with params:", params);
+      const result = await getTimeframeEventsFn(params);
       console.log("After function call, raw result:", JSON.stringify(result));
       
       // Function returned a Firebase error (common when function fails to execute)
@@ -72,7 +79,7 @@ function EventsView({ timeframe, title }) {
     } finally {
       setLoading(false);
     }
-  }, [timeframe, functions]); // Include timeframe and functions as dependencies
+  }, [timeframe, month, year, functions]); // Include timeframe, month, year and functions as dependencies
 
   useEffect(() => {
     fetchEvents();

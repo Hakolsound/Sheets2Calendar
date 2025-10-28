@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useHistory, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { getAuth, signOut } from 'firebase/auth';
 import { FiCalendar, FiSettings, FiMonitor, FiLogOut, FiMenu, FiX, FiFileText, FiPlus } from 'react-icons/fi';
+import useAuthStore from '../store/authStore';
 
-function Navbar({ user }) {
-  const history = useHistory();
+function Navbar() {
+  const { user } = useAuthStore();
+  const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -30,7 +32,7 @@ function Navbar({ user }) {
   const handleLogout = async () => {
     try {
       await signOut(auth);
-      history.push('/login');
+      navigate('/login');
     } catch (error) {
       console.error('Logout error:', error);
     }
@@ -55,7 +57,7 @@ function Navbar({ user }) {
     e.preventDefault();
     const quoteId = prompt('Enter quote ID:');
     if (quoteId) {
-      history.push(`/quotes/${quoteId}`);
+      navigate(`/quotes/${quoteId}`);
     }
     closeMenu();
   };
@@ -64,6 +66,12 @@ function Navbar({ user }) {
   const isActive = (path) => {
     if (path === '/quotes') {
       return location.pathname.startsWith('/quotes');
+    }
+    // Handle legacy routes that redirect to /control
+    if (path === '/control') {
+      return location.pathname === '/control' ||
+             location.pathname === '/setup' ||
+             location.pathname === '/monitor';
     }
     return location.pathname === path;
   };
@@ -87,7 +95,8 @@ function Navbar({ user }) {
         
         <div className="navbar-brand">
           <Link to="/" onClick={closeMenu}>
-            Fine AV Services
+            <strong>Fine AV</strong>
+            {!isMobile && <span> Services</span>}
           </Link>
         </div>
         
@@ -157,19 +166,12 @@ function Navbar({ user }) {
                 )}
               </div>
               
-              <Link 
-                to="/setup" 
-                className={`navbar-item ${isActive('/setup') ? 'active' : ''}`} 
+              <Link
+                to="/control"
+                className={`navbar-item ${isActive('/control') ? 'active' : ''}`}
                 onClick={closeMenu}
               >
-                <FiSettings /> Setup
-              </Link>
-              <Link 
-                to="/monitor" 
-                className={`navbar-item ${isActive('/monitor') ? 'active' : ''}`} 
-                onClick={closeMenu}
-              >
-                <FiMonitor /> Monitor
+                <FiSettings /> Control Center
               </Link>
             </div>
           </div>
@@ -221,12 +223,12 @@ function Navbar({ user }) {
             <FiFileText />
             <span>Quotes</span>
           </Link>
-          <Link 
-            to="/setup" 
-            className={`tab-item ${isActive('/setup') ? 'active' : ''}`}
+          <Link
+            to="/control"
+            className={`tab-item ${isActive('/control') ? 'active' : ''}`}
           >
             <FiSettings />
-            <span>Setup</span>
+            <span>Control</span>
           </Link>
         </div>
       )}
@@ -234,14 +236,6 @@ function Navbar({ user }) {
       {/* Mobile expanded menu overlay */}
       {isMobile && menuOpen && (
         <div className={`navbar-menu expanded`}>
-          <Link 
-            to="/monitor" 
-            className={`navbar-item ${isActive('/monitor') ? 'active' : ''}`} 
-            onClick={closeMenu}
-          >
-            <FiMonitor /> Monitor
-          </Link>
-          
           {/* Quote options in expanded menu */}
           <div className="navbar-subheader">Quotes</div>
           <Link 

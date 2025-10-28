@@ -1,10 +1,10 @@
 import React from 'react';
 import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
-import { useHistory } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import GoogleButton from 'react-google-button';
 
 function Login({ authError }) {
-  const history = useHistory();
+  const navigate = useNavigate();
   const auth = getAuth();
 
   const handleGoogleLogin = async () => {
@@ -15,7 +15,7 @@ function Login({ authError }) {
         prompt: 'select_account'
       });
       await signInWithPopup(auth, provider);
-      history.push('/setup');
+      navigate('/setup');
     } catch (error) {
       console.error('Login error:', error);
     }

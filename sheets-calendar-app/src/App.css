@@ -2,35 +2,35 @@
 
 /* ======= VARIABLES ======= */
 :root {
-  /* Primary Colors */
-  --primary-color: #3f51b5;
-  --primary-light: #757de8;
-  --primary-dark: #002984;
-  --secondary-color: #4db6ac;
-  --accent-color: #ff4081;
+  /* Primary Colors (Dark Theme) */
+  --primary-color: #60a5fa; /* Blue-400 */
+  --primary-light: #93c5fd;
+  --primary-dark: #3b82f6;
+  --secondary-color: #a78bfa; /* Purple-400 */
+  --accent-color: #f87171; /* Red-400 */
 
-  /* Background and Surface Colors */
-  --background-color: #f5f5f5;
-  --card-background: #ffffff;
-  --header-bg: #5c7cfa;
-  --header-bg-dark: #4365f0;
-  
-  /* Text Colors */
-  --text-color: #212121;
-  --text-secondary: #757575;
+  /* Background and Surface Colors (Dark Theme) */
+  --background-color: #0f172a; /* Slate-900 */
+  --card-background: #1e293b; /* Slate-800 */
+  --header-bg: #1e293b;
+  --header-bg-dark: #334155;
+
+  /* Text Colors (Dark Theme) */
+  --text-color: #f1f5f9; /* Slate-100 */
+  --text-secondary: #cbd5e1; /* Slate-300 */
   --text-light: #ffffff;
-  
-  /* Border and Shadow */
-  --border-color: #e0e0e0;
-  --shadow-light: 0 3px 6px rgba(0, 0, 0, 0.1);
-  --shadow-medium: 0 6px 12px rgba(0, 0, 0, 0.15);
-  
+
+  /* Border and Shadow (Dark Theme) */
+  --border-color: rgba(148, 163, 184, 0.1);
+  --shadow-light: 0 3px 6px rgba(0, 0, 0, 0.3);
+  --shadow-medium: 0 6px 12px rgba(0, 0, 0, 0.4);
+
   /* Sizes and Transitions */
-  --border-radius: 12px;  /* Increased border radius for rounder corners */
+  --border-radius: 12px;
   --button-radius: 8px;
   --transition-speed: 0.2s;
-  
-  /* Event Type Colors */
+
+  /* Event Type Colors (Maintained for event cards) */
   --event-type-standup: #E6D4F0;
   --event-type-cameras: #FFF2CC;
   --event-type-conference: #F8CEBD;
@@ -1657,4 +1657,54 @@ body {
 .filter-container,
 .header-controls {
   display: none !important;
+}
+
+/* Month View Navigation Styles */
+.month-view-container {
+  padding: 20px;
+}
+
+.month-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin-bottom: 30px;
+  padding: 20px;
+  background: var(--card-background);
+  border-radius: var(--border-radius);
+  box-shadow: var(--shadow-light);
+}
+
+.month-nav-button {
+  background: var(--primary-color);
+  color: var(--text-light);
+  border: none;
+  border-radius: var(--button-radius);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-speed);
+  font-size: 18px;
+}
+
+.month-nav-button:hover {
+  background: var(--primary-dark);
+  transform: scale(1.05);
+}
+
+.month-nav-button:active {
+  transform: scale(0.95);
+}
+
+.month-display h2 {
+  margin: 0;
+  color: var(--text-color);
+  font-size: 1.5rem;
+  font-weight: 600;
+  text-align: center;
+  min-width: 200px;
 }

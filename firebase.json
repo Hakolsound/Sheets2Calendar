@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "sheet2cal-4fd7e",
     "public": "sheets-calendar-app/build",
     "ignore": [
       "firebase.json",

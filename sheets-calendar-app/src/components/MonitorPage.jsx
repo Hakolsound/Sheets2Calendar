@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { getFirestore, collection, doc, getDoc } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import AuthorizeApis from './AuthorizeApis';
+import useAuthStore from '../store/authStore';
 
-function MonitorPage({ user }) {
+function MonitorPage() {
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState(null);

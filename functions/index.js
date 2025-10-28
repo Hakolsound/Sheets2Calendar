@@ -430,6 +430,176 @@ function getColumnLetter(index) {
   return letter;
 }
 
+// ===== FIREBASE EVENT TRACKING HELPERS =====
+// These functions manage event tracking in Firebase instead of the spreadsheet
+// to prevent accidental deletion and provide more reliable tracking
+
+/**
+ * Save event tracking data to Firebase
+ * @param {string} userId - User ID
+ * @param {number} rowIndex - 0-based row index in the data array
+ * @param {string} eventId - Calendar event ID
+ * @param {string} status - Status: PROCESSED, CANCELLED, UPDATED, etc.
+ * @param {Object} eventData - Additional event data (title, date, location, etc.)
+ */
+async function saveEventTracking(userId, rowIndex, eventId, status, eventData = {}) {
+  try {
+    const sheetRow = rowIndex + 2; // Convert to actual sheet row number
+    const trackingData = {
+      eventId: eventId,
+      status: status,
+      sheetRow: sheetRow,
+      rowIndex: rowIndex,
+      title: eventData.title || '',
+      date: eventData.date || '',
+      location: eventData.location || '',
+      lastSync: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    // Create or update the tracking document
+    const docRef = db.collection('eventTracking')
+      .doc(userId)
+      .collection('events')
+      .doc(`row_${rowIndex}`);
+
+    const doc = await docRef.get();
+    if (!doc.exists) {
+      trackingData.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    await docRef.set(trackingData, { merge: true });
+    console.log(`✓ Saved event tracking for row ${sheetRow} (rowIndex: ${rowIndex})`);
+
+    return true;
+  } catch (error) {
+    console.error(`Error saving event tracking for row ${rowIndex}:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Get event tracking data from Firebase
+ * @param {string} userId - User ID
+ * @param {number} rowIndex - 0-based row index in the data array
+ * @returns {Object|null} Event tracking data or null if not found
+ */
+async function getEventTracking(userId, rowIndex) {
+  try {
+    const docRef = db.collection('eventTracking')
+      .doc(userId)
+      .collection('events')
+      .doc(`row_${rowIndex}`);
+
+    const doc = await docRef.get();
+    if (doc.exists) {
+      return doc.data();
+    }
+    return null;
+  } catch (error) {
+    console.error(`Error getting event tracking for row ${rowIndex}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Get all event tracking data for a user
+ * @param {string} userId - User ID
+ * @returns {Array} Array of event tracking data with rowIndex as key
+ */
+async function getAllEventTracking(userId) {
+  try {
+    const snapshot = await db.collection('eventTracking')
+      .doc(userId)
+      .collection('events')
+      .get();
+
+    const trackingData = {};
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      trackingData[data.rowIndex] = data;
+    });
+
+    console.log(`Retrieved tracking data for ${Object.keys(trackingData).length} events`);
+    return trackingData;
+  } catch (error) {
+    console.error('Error getting all event tracking:', error.message);
+    return {};
+  }
+}
+
+/**
+ * Delete event tracking data from Firebase
+ * @param {string} userId - User ID
+ * @param {number} rowIndex - 0-based row index in the data array
+ */
+async function deleteEventTracking(userId, rowIndex) {
+  try {
+    await db.collection('eventTracking')
+      .doc(userId)
+      .collection('events')
+      .doc(`row_${rowIndex}`)
+      .delete();
+
+    console.log(`✓ Deleted event tracking for row ${rowIndex + 2} (rowIndex: ${rowIndex})`);
+    return true;
+  } catch (error) {
+    console.error(`Error deleting event tracking for row ${rowIndex}:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Batch save event tracking data
+ * @param {string} userId - User ID
+ * @param {Array} trackingUpdates - Array of {rowIndex, eventId, status, eventData} objects
+ */
+async function batchSaveEventTracking(userId, trackingUpdates) {
+  try {
+    console.log(`Batch saving ${trackingUpdates.length} event tracking records...`);
+
+    // Firestore has a limit of 500 operations per batch
+    const batchSize = 500;
+    for (let i = 0; i < trackingUpdates.length; i += batchSize) {
+      const batch = db.batch();
+      const chunk = trackingUpdates.slice(i, i + batchSize);
+
+      for (const update of chunk) {
+        const { rowIndex, eventId, status, eventData = {} } = update;
+        const sheetRow = rowIndex + 2;
+
+        const docRef = db.collection('eventTracking')
+          .doc(userId)
+          .collection('events')
+          .doc(`row_${rowIndex}`);
+
+        const trackingData = {
+          eventId: eventId,
+          status: status,
+          sheetRow: sheetRow,
+          rowIndex: rowIndex,
+          title: eventData.title || '',
+          date: eventData.date || '',
+          location: eventData.location || '',
+          lastSync: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        batch.set(docRef, trackingData, { merge: true });
+      }
+
+      await batch.commit();
+      console.log(`✓ Committed batch ${Math.floor(i / batchSize) + 1} (${chunk.length} records)`);
+    }
+
+    console.log(`✓ Batch saved all ${trackingUpdates.length} event tracking records`);
+    return true;
+  } catch (error) {
+    console.error('Error in batch save event tracking:', error.message);
+    return false;
+  }
+}
+
 // Helper functions for custom date/time handling
 function getStartDateTime(row, dateIndex) {
   const dateStr = row[dateIndex]; // Date is in column B (index 1)
@@ -479,24 +649,98 @@ function parseDate(dateStr) {
 
 
 /**
+ * Helper function to fetch hyperlinks from Column T for specific rows
+ * @param {object} sheetService - Google Sheets API service
+ * @param {string} spreadsheetId - Spreadsheet ID
+ * @param {string} sheetName - Sheet name
+ * @param {Array} rowIndices - Array of 0-based row indices
+ * @returns {Object} Map of rowIndex to hyperlink URL
+ */
+async function fetchCoordinationSheetLinks(sheetService, spreadsheetId, sheetName, rowIndices) {
+  const hyperlinks = {};
+
+  try {
+    // Column T is index 19 (0-based), which is column "T" in A1 notation
+    // Fetch cell data with hyperlinks for Column T
+    const batchSize = 50;
+    for (let i = 0; i < rowIndices.length; i += batchSize) {
+      const batch = rowIndices.slice(i, i + batchSize);
+      const ranges = batch.map(rowIndex => {
+        const sheetRow = rowIndex + 2; // +2 for header row
+        return `${sheetName}!T${sheetRow}`;
+      });
+
+      const response = await sheetService.spreadsheets.get({
+        spreadsheetId: spreadsheetId,
+        ranges: ranges,
+        fields: 'sheets(data(rowData(values(hyperlink))))'
+      });
+
+      if (response.data && response.data.sheets && response.data.sheets[0].data) {
+        response.data.sheets[0].data.forEach((rangeData, idx) => {
+          if (rangeData.rowData && rangeData.rowData[0] && rangeData.rowData[0].values) {
+            const cell = rangeData.rowData[0].values[0];
+            if (cell && cell.hyperlink) {
+              const rowIndex = batch[idx];
+              hyperlinks[rowIndex] = cell.hyperlink;
+              console.log(`Found hyperlink for row ${rowIndex + 2}: ${cell.hyperlink}`);
+            }
+          }
+        });
+      }
+    }
+
+    console.log(`Fetched ${Object.keys(hyperlinks).length} coordination sheet links`);
+  } catch (error) {
+    console.error('Error fetching coordination sheet links:', error.message);
+  }
+
+  return hyperlinks;
+}
+
+/**
  * Enhanced helper function for description formatting with technicians
  * @param {Array} row - The row data
  * @returns {string} Formatted description
  */
-function formatDescription(row) {
-  let description = `מנהל אירוע: ${row[11] || ''}\n\n`; // Column L (index 11)
-  
+function formatDescription(row, coordinationSheetUrl = null) {
+  let description = '';
+
+  // Add coordination sheet with embedded hyperlink if exists (Column T - index 19)
+  if (coordinationSheetUrl) {
+    // Make "דף תיאום" itself clickable
+    description += `<a href="${coordinationSheetUrl}">דף תיאום</a>\n\n`;
+  } else if (row[19]) {
+    // If no URL but there's text, still show it
+    description += `דף תיאום: ${row[19]}\n\n`;
+  }
+
+  // Add event manager (Column L - index 11)
+  const manager = row[11] || '';
+  if (manager) {
+    description += `מנהל אירוע: ${manager}\n\n`;
+  }
+
   // Add technicians section with clear separation for parsing
   description += 'טכנאים משובצים:\n';
-  
-  // Get technicians using the enhanced getTechnicians function
-  const technicians = getTechnicians(row);
-  
-  // Add each technician to the description
-  for (const tech of technicians) {
-    description += `${tech}\n`;
+
+  // Get technicians from columns U-AC (indices 20-28)
+  const technicians = [];
+  for (let i = 20; i <= 28; i++) {
+    if (row[i] && row[i].trim()) {
+      technicians.push(row[i].trim());
+    }
   }
-  
+
+  // Add each technician to the description
+  if (technicians.length > 0) {
+    for (const tech of technicians) {
+      description += `${tech}\n`;
+    }
+  } else {
+    description += 'אין טכנאים משובצים\n';
+  }
+
   return description;
 }
 
@@ -898,12 +1142,12 @@ exports.manualScan = functions.https.onCall(async (data, context) => {
     });
     
     // Reset lastProcessedRow if requested
-    if (data.resetProcessed) {
+    if (data && data.resetProcessed) {
       await db.collection("configurations").doc(userId).update({
         lastProcessedRow: 2, // Start at row 2 (index 1) to skip header
       });
       console.log("Reset lastProcessedRow to 2 for user", userId);
-      
+
       // Update local config
       config.lastProcessedRow = 2;
     }
@@ -3443,11 +3687,13 @@ exports.deleteEventsInMonth = functions
       
       const config = configDoc.data();
       const calendarId = config.calendarId;
-      
+
       if (!calendarId) {
         throw new functions.https.HttpsError("failed-precondition", "Calendar ID not configured");
       }
-      
+
+      console.log(`Using calendar ID: ${calendarId}`);
+
       // Setup API client
       console.log("Initializing service account auth");
       const jwtClient = new google.auth.JWT(
@@ -3465,80 +3711,130 @@ exports.deleteEventsInMonth = functions
       const calendarService = google.calendar({version: 'v3', auth: jwtClient});
       
       // Create date range for the specific month
-      const timeMin = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
-      const timeMax = new Date(year, month, 0, 23, 59, 59).toISOString(); // Last day of month
-      
+      // Use the first day of the month at 00:00:00 and last day at 23:59:59
+      // Important: Don't convert to ISO string yet - keep as Date objects
+      const startDate = new Date(year, month - 1, 1, 0, 0, 0);
+      const endDate = new Date(year, month, 0, 23, 59, 59);
+
+      // Format for Google Calendar API - it expects ISO strings
+      const timeMin = startDate.toISOString();
+      const timeMax = endDate.toISOString();
+
       console.log(`Searching for events from ${timeMin} to ${timeMax}`);
-      
-      // Get all events in the date range
-      let pageToken = null;
-      let eventsDeleted = 0;
-      let totalEvents = 0;
-      let eventsByDay = {};
-      
-      do {
-        const response = await calendarService.events.list({
-          calendarId: calendarId,
-          timeMin: timeMin,
-          timeMax: timeMax,
-          singleEvents: true,
-          pageToken: pageToken,
-          maxResults: 100 // Process in batches of 100 events
-        });
-        
-        const events = response.data.items || [];
-        pageToken = response.data.nextPageToken;
-        totalEvents += events.length;
-        
-        console.log(`Found ${events.length} events to delete in batch`);
-        
-        // Group events by day to detect duplicates
-        if (includeDuplicates) {
-          events.forEach(event => {
-            const eventDate = event.start.dateTime || event.start.date;
-            const day = eventDate.split('T')[0]; // Extract YYYY-MM-DD
-            
-            if (!eventsByDay[day]) {
-              eventsByDay[day] = {};
-            }
-            
-            const eventKey = `${event.summary || ''}|${event.description || ''}`;
-            if (!eventsByDay[day][eventKey]) {
-              eventsByDay[day][eventKey] = [];
-            }
-            
-            eventsByDay[day][eventKey].push(event);
-          });
-        }
-        
-        // Delete each event
-        for (const event of events) {
-          try {
-            await calendarService.events.delete({
-              calendarId: calendarId,
-              eventId: event.id
+
+      // Get Firebase tracking data for this user to find events to delete
+      console.log('Loading event tracking data from Firebase...');
+      const trackingData = await getAllEventTracking(userId);
+      console.log(`Loaded tracking for ${Object.keys(trackingData).length} events`);
+
+      // Filter tracking data to only include events in the target month
+      const eventsToDelete = [];
+      for (const [rowIndex, tracking] of Object.entries(trackingData)) {
+        if (tracking.eventId && tracking.date) {
+          // Parse the date (format: YYYY-MM-DD)
+          const eventDate = new Date(tracking.date);
+          const eventMonth = eventDate.getMonth() + 1; // 0-based to 1-based
+          const eventYear = eventDate.getFullYear();
+
+          if (eventMonth === month && eventYear === year) {
+            eventsToDelete.push({
+              eventId: tracking.eventId,
+              rowIndex: parseInt(rowIndex),
+              title: tracking.title || 'Unknown'
             });
-            eventsDeleted++;
-            console.log(`Deleted event: ${event.id} - ${event.summary}`);
-          } catch (deleteError) {
-            console.error(`Error deleting event ${event.id}: ${deleteError.message}`);
           }
         }
-        
-      } while (pageToken);
-      
-      // Handle duplicate events with different IDs (if requested)
-      if (includeDuplicates) {
-        console.log("Checking for duplicate events that might have been missed...");
-        const duplicateCount = Object.values(eventsByDay).reduce((count, dayEvents) => {
-          return count + Object.values(dayEvents)
-            .filter(sameEvents => sameEvents.length > 1)
-            .reduce((c, arr) => c + arr.length - 1, 0);
-        }, 0);
-        
-        console.log(`Found ${duplicateCount} potential duplicate events`);
       }
-      
+
+      console.log(`Found ${eventsToDelete.length} tracked events to delete for ${month}/${year}`);
+
+      // Delete each tracked event from the calendar
+      let eventsDeleted = 0;
+      const deletedRowIndices = [];
+      const trackedEventIds = new Set();
+
+      for (const eventInfo of eventsToDelete) {
+        trackedEventIds.add(eventInfo.eventId);
+        try {
+          await calendarService.events.delete({
+            calendarId: calendarId,
+            eventId: eventInfo.eventId
+          });
+          eventsDeleted++;
+          deletedRowIndices.push(eventInfo.rowIndex);
+          console.log(`Deleted tracked event: ${eventInfo.eventId} - ${eventInfo.title}`);
+        } catch (deleteError) {
+          // Event might have been already deleted or not found
+          console.error(`Error deleting event ${eventInfo.eventId}: ${deleteError.message}`);
+
+          // Still remove from tracking if it's a 404 (not found) error
+          if (deleteError.code === 404 || deleteError.message.includes('Not Found')) {
+            deletedRowIndices.push(eventInfo.rowIndex);
+          }
+        }
+      }
+
+      // Also query the calendar directly for any untracked events in this month
+      // This handles events created before Firebase tracking was implemented or by manualScan
+      console.log(`Searching calendar directly for untracked events in ${month}/${year}...`);
+      console.log(`Query params: calendarId=${calendarId}, timeMin=${timeMin}, timeMax=${timeMax}`);
+      let pageToken = null;
+      let untrackedDeleted = 0;
+
+      do {
+        try {
+          const response = await calendarService.events.list({
+            calendarId: calendarId,
+            timeMin: timeMin,
+            timeMax: timeMax,
+            singleEvents: true,
+            pageToken: pageToken,
+            maxResults: 100
+          });
+
+          const events = response.data.items || [];
+          pageToken = response.data.nextPageToken;
+
+          console.log(`Found ${events.length} calendar events in batch (page token: ${pageToken || 'none'})`);
+          if (events.length > 0) {
+            console.log(`Sample event: ${JSON.stringify(events[0])}`);
+          }
+
+          // Delete events that aren't in our tracking
+          for (const event of events) {
+            if (!trackedEventIds.has(event.id)) {
+              try {
+                await calendarService.events.delete({
+                  calendarId: calendarId,
+                  eventId: event.id
+                });
+                untrackedDeleted++;
+                eventsDeleted++;
+                console.log(`Deleted untracked event: ${event.id} - ${event.summary || 'Unknown'}`);
+              } catch (deleteError) {
+                console.error(`Error deleting untracked event ${event.id}: ${deleteError.message}`);
+              }
+            }
+          }
+        } catch (listError) {
+          console.error(`Error listing calendar events: ${listError.message}`);
+          console.error(`Error details: ${JSON.stringify(listError)}`);
+          break; // Exit loop on error
+        }
+      } while (pageToken);
+
+      console.log(`Deleted ${untrackedDeleted} untracked events from calendar`);
+
+      // Remove deleted events from Firebase tracking
+      if (deletedRowIndices.length > 0) {
+        console.log(`Removing ${deletedRowIndices.length} events from Firebase tracking...`);
+        for (const rowIndex of deletedRowIndices) {
+          await deleteEventTracking(userId, rowIndex);
+        }
+      }
+
+      const totalEvents = eventsToDelete.length + untrackedDeleted;
+
       // Log the deletion
       await db.collection("processingLogs").add({
         userId,
@@ -3563,9 +3859,625 @@ exports.deleteEventsInMonth = functions
     }
   });
 
+// Reprocess selected rows (re-add events to calendar)
+exports.reprocessSelectedRows = functions
+  .runWith({
+    timeoutSeconds: 300, // 5 minutes
+    memory: '512MB'
+  })
+  .https.onCall(async (data, context) => {
+    // Authentication checks
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated", "Authentication required");
+    }
+
+    const email = context.auth.token.email || "";
+    if (!email.endsWith("@hakolsound.co.il")) {
+      throw new functions.https.HttpsError("permission-denied", "Only hakolsound.co.il organization members allowed");
+    }
+
+    const userId = context.auth.uid;
+
+    try {
+      const { rowIndices } = data; // Array of row indices to reprocess
+
+      if (!rowIndices || !Array.isArray(rowIndices) || rowIndices.length === 0) {
+        throw new functions.https.HttpsError("invalid-argument", "rowIndices must be a non-empty array");
+      }
+
+      console.log(`Reprocessing ${rowIndices.length} rows for user ${userId}`);
+
+      // Get user configuration
+      const configDoc = await db.collection("configurations").doc(userId).get();
+      if (!configDoc.exists) {
+        throw new functions.https.HttpsError("not-found", "Configuration not found");
+      }
+
+      const config = configDoc.data();
+      console.log("Config:", { spreadsheetId: config.spreadsheetId, calendarId: config.calendarId });
+
+      // Setup service account
+      const jwtClient = new google.auth.JWT(
+        serviceAccount.client_email,
+        null,
+        serviceAccount.private_key,
+        ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/calendar']
+      );
+
+      await jwtClient.authorize();
+
+      const sheetService = google.sheets({version: 'v4', auth: jwtClient});
+      const calendarService = google.calendar({version: 'v3', auth: jwtClient});
+
+      // Get all data from the sheet
+      const response = await sheetService.spreadsheets.values.get({
+        spreadsheetId: config.spreadsheetId,
+        range: `${config.sheetName}!${config.dataRange}`
+      });
+
+      const rows = response.data.values || [];
+      let processedCount = 0;
+      let skippedCount = 0;
+      const errors = [];
+      const firebaseUpdates = []; // Collect Firebase tracking updates
+
+      // Fetch coordination sheet hyperlinks for all selected rows
+      console.log('Fetching coordination sheet links...');
+      const coordinationLinks = await fetchCoordinationSheetLinks(
+        sheetService,
+        config.spreadsheetId,
+        config.sheetName,
+        rowIndices
+      );
+
+      // Process each selected row
+      for (const rowIndex of rowIndices) {
+        try {
+          // rowIndex is 0-based for the data array, but the sheet is 1-based + 1 for header
+          const row = rows[rowIndex];
+
+          if (!row || row.length === 0) {
+            console.log(`Skipping empty row at index ${rowIndex}`);
+            skippedCount++;
+            continue;
+          }
+
+          // Parse the event data using the same SHEET_COLUMNS mapping
+          const dateValue = row[SHEET_COLUMNS.DATE]; // Column B (index 1)
+          if (!dateValue) {
+            skippedCount++;
+            continue;
+          }
+
+          // Parse the date
+          let eventDate;
+          if (typeof dateValue === 'number') {
+            eventDate = excelDateToJSDate(dateValue);
+          } else if (typeof dateValue === 'string') {
+            eventDate = parseDate(dateValue);
+          }
+
+          if (!eventDate || isNaN(eventDate.getTime())) {
+            console.log(`Invalid date for row ${rowIndex}: ${dateValue}`);
+            skippedCount++;
+            continue;
+          }
+
+          // Extract event details using SHEET_COLUMNS mapping
+          const title = row[SHEET_COLUMNS.TITLE] || '';
+          const location = row[SHEET_COLUMNS.LOCATION] || '';
+          const startTime = row[SHEET_COLUMNS.START_TIME] || '';
+          const endTime = row[SHEET_COLUMNS.END_TIME] || '';
+          const shouldCancel = row[18] === true || row[18] === "true" || row[18] === "TRUE";
+          const finalTitle = shouldCancel ? `Canceled: ${title}` : title;
+
+          // Create calendar event with formatted description
+          const coordinationUrl = coordinationLinks[rowIndex] || null;
+          const event = {
+            summary: finalTitle,
+            location: location,
+            description: formatDescription(row, coordinationUrl), // Use formatted description with hyperlink
+            start: {},
+            end: {}
+          };
+
+          // Set start/end times
+          if (startTime && typeof startTime === 'string' && startTime.includes(':')) {
+            const [startHour, startMin] = startTime.split(':').map(Number);
+
+            // Format datetime in local timezone (don't convert to UTC)
+            // Format: YYYY-MM-DDTHH:MM:SS
+            const year = eventDate.getFullYear();
+            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+            const day = String(eventDate.getDate()).padStart(2, '0');
+            const hour = String(startHour).padStart(2, '0');
+            const minute = String(startMin).padStart(2, '0');
+
+            event.start.dateTime = `${year}-${month}-${day}T${hour}:${minute}:00`;
+            event.start.timeZone = config.timezone || 'Asia/Jerusalem';
+
+            if (endTime && typeof endTime === 'string' && endTime.includes(':')) {
+              const [endHour, endMin] = endTime.split(':').map(Number);
+              const endHourStr = String(endHour).padStart(2, '0');
+              const endMinStr = String(endMin).padStart(2, '0');
+              event.end.dateTime = `${year}-${month}-${day}T${endHourStr}:${endMinStr}:00`;
+              event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+            } else {
+              // Default end time: 6 hours after start
+              const endHour = startHour + 6;
+              const endHourStr = String(endHour).padStart(2, '0');
+              event.end.dateTime = `${year}-${month}-${day}T${endHourStr}:${minute}:00`;
+              event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+            }
+          } else {
+            // No time specified - use default 17:00-23:00
+            const year = eventDate.getFullYear();
+            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+            const day = String(eventDate.getDate()).padStart(2, '0');
+
+            event.start.dateTime = `${year}-${month}-${day}T17:00:00`;
+            event.start.timeZone = config.timezone || 'Asia/Jerusalem';
+            event.end.dateTime = `${year}-${month}-${day}T23:00:00`;
+            event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+          }
+
+          // Insert the event into calendar
+          const calendarResponse = await calendarService.events.insert({
+            calendarId: config.calendarId,
+            resource: event
+          });
+
+          processedCount++;
+          const eventId = calendarResponse.data.id;
+          console.log(`Processed row ${rowIndex + 2}: ${finalTitle} (Event ID: ${eventId})`);
+
+          // Prepare Firebase tracking data for this row
+          const processedValue = shouldCancel ? "CANCELLED" : "PROCESSED";
+
+          // Parse date for tracking
+          let dateStr = '';
+          if (eventDate) {
+            dateStr = eventDate.toISOString().split('T')[0];
+          }
+
+          firebaseUpdates.push({
+            rowIndex: rowIndex,
+            eventId: eventId,
+            status: processedValue,
+            eventData: {
+              title: finalTitle,
+              date: dateStr,
+              location: location
+            }
+          });
+
+        } catch (rowError) {
+          console.error(`Error processing row ${rowIndex}:`, rowError);
+          errors.push({ rowIndex, error: rowError.message });
+        }
+      }
+
+      // Save all tracking data to Firebase
+      if (firebaseUpdates.length > 0) {
+        console.log(`Saving ${firebaseUpdates.length} event tracking records to Firebase...`);
+        await batchSaveEventTracking(userId, firebaseUpdates);
+      }
+
+      // Write event IDs back to the spreadsheet (Column AL - event ID column)
+      // This provides a backup identifier in case row indices change
+      console.log(`Writing ${firebaseUpdates.length} event IDs to spreadsheet...`);
+      for (const update of firebaseUpdates) {
+        try {
+          const sheetRowNum = update.rowIndex + 2;
+          const columnLetter = 'AL'; // Column AL (index 37)
+
+          await sheetService.spreadsheets.values.update({
+            spreadsheetId: config.spreadsheetId,
+            range: `${config.sheetName}!${columnLetter}${sheetRowNum}`,
+            valueInputOption: "RAW",
+            resource: {
+              values: [[update.eventId]]
+            },
+          });
+
+          console.log(`✓ Wrote event ID to ${columnLetter}${sheetRowNum}`);
+
+          // Add delay to prevent rate limiting
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (writeError) {
+          console.error(`Error writing event ID to sheet row ${update.rowIndex + 2}:`, writeError.message);
+        }
+      }
+
+      // Log the operation
+      await db.collection("processingLogs").add({
+        userId,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        operation: "reprocess-selected-rows",
+        rowCount: rowIndices.length,
+        processedCount,
+        skippedCount,
+        errorCount: errors.length
+      });
+
+      return {
+        success: true,
+        message: `Processed ${processedCount} of ${rowIndices.length} rows`,
+        stats: {
+          requested: rowIndices.length,
+          processed: processedCount,
+          skipped: skippedCount,
+          errors: errors.length
+        },
+        errors: errors.length > 0 ? errors : undefined
+      };
+
+    } catch (error) {
+      console.error("Error in reprocessSelectedRows:", error);
+      throw new functions.https.HttpsError("internal", error.message);
+    }
+  });
+
+// Scan entire month - similar to reprocessSelectedRows but for all events in a month
+exports.scanMonthEvents = functions
+  .runWith({
+    timeoutSeconds: 540,
+    memory: '1GB'
+  })
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated", "Authentication required");
+    }
+
+    const email = context.auth.token.email || "";
+    if (!email.endsWith("@hakolsound.co.il")) {
+      throw new functions.https.HttpsError("permission-denied", "Only hakolsound.co.il organization members allowed");
+    }
+
+    const userId = context.auth.uid;
+
+    try {
+      const { month, year } = data;
+
+      if (!month || !year) {
+        throw new functions.https.HttpsError("invalid-argument", "month and year required");
+      }
+
+      console.log(`Scanning all events for ${month}/${year} for user ${userId}`);
+
+      // Get user configuration
+      const configDoc = await db.collection("configurations").doc(userId).get();
+      if (!configDoc.exists) {
+        throw new functions.https.HttpsError("not-found", "Configuration not found");
+      }
+
+      const config = configDoc.data();
+
+      // Setup service account
+      const jwtClient = new google.auth.JWT(
+        serviceAccount.client_email,
+        null,
+        serviceAccount.private_key,
+        ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/calendar']
+      );
+
+      await jwtClient.authorize();
+
+      const sheetService = google.sheets({version: 'v4', auth: jwtClient});
+      const calendarService = google.calendar({version: 'v3', auth: jwtClient});
+
+      // Get all data from the sheet
+      const response = await sheetService.spreadsheets.values.get({
+        spreadsheetId: config.spreadsheetId,
+        range: `${config.sheetName}!${config.dataRange}`
+      });
+
+      const rows = response.data.values || [];
+
+      // Filter rows by month/year
+      const rowsToProcess = [];
+      const excludedEventTypes = ['הצעת מחיר', 'השכרות', 'הפקה', 'אופציה'];
+
+      rows.forEach((row, rowIndex) => {
+        if (!row || row.length <= SHEET_COLUMNS.DATE) return;
+
+        const dateValue = row[SHEET_COLUMNS.DATE];
+        if (!dateValue) return;
+
+        // Parse date
+        let eventDate;
+        if (typeof dateValue === 'number') {
+          eventDate = excelDateToJSDate(dateValue);
+        } else if (typeof dateValue === 'string') {
+          eventDate = parseDate(dateValue);
+        }
+
+        if (!eventDate || isNaN(eventDate.getTime())) return;
+
+        // Check if in target month/year
+        if (eventDate.getMonth() + 1 === month && eventDate.getFullYear() === year) {
+          // Skip excluded types
+          const eventType = row[SHEET_COLUMNS.EVENT_TYPE_D] || '';
+          if (excludedEventTypes.includes(eventType)) return;
+
+          rowsToProcess.push({ row, rowIndex, eventDate });
+        }
+      });
+
+      console.log(`Found ${rowsToProcess.length} events to process for ${month}/${year}`);
+
+      // Fetch coordination sheet hyperlinks for all rows to process
+      const rowIndicesToFetch = rowsToProcess.map(r => r.rowIndex);
+      console.log('Fetching coordination sheet links...');
+      const coordinationLinks = await fetchCoordinationSheetLinks(
+        sheetService,
+        config.spreadsheetId,
+        config.sheetName,
+        rowIndicesToFetch
+      );
+
+      // Process each row
+      let processedCount = 0;
+      let skippedCount = 0;
+      const errors = [];
+      const firebaseUpdates = [];
+
+      for (const { row, rowIndex, eventDate } of rowsToProcess) {
+        try {
+          const title = row[SHEET_COLUMNS.TITLE] || '';
+          const location = row[SHEET_COLUMNS.LOCATION] || '';
+          const startTime = row[SHEET_COLUMNS.START_TIME] || '';
+          const endTime = row[SHEET_COLUMNS.END_TIME] || '';
+          const shouldCancel = row[18] === true || row[18] === "true" || row[18] === "TRUE";
+          const finalTitle = shouldCancel ? `Canceled: ${title}` : title;
+
+          // Create calendar event with formatted description
+          const coordinationUrl = coordinationLinks[rowIndex] || null;
+          const event = {
+            summary: finalTitle,
+            location: location,
+            description: formatDescription(row, coordinationUrl), // Use formatted description with hyperlink
+            start: {},
+            end: {}
+          };
+
+          // Set start/end times using same logic as reprocessSelectedRows
+          if (startTime && typeof startTime === 'string' && startTime.includes(':')) {
+            const [startHour, startMin] = startTime.split(':').map(Number);
+            const year = eventDate.getFullYear();
+            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+            const day = String(eventDate.getDate()).padStart(2, '0');
+            const hour = String(startHour).padStart(2, '0');
+            const minute = String(startMin).padStart(2, '0');
+
+            event.start.dateTime = `${year}-${month}-${day}T${hour}:${minute}:00`;
+            event.start.timeZone = config.timezone || 'Asia/Jerusalem';
+
+            if (endTime && typeof endTime === 'string' && endTime.includes(':')) {
+              const [endHour, endMin] = endTime.split(':').map(Number);
+              const endHourStr = String(endHour).padStart(2, '0');
+              const endMinStr = String(endMin).padStart(2, '0');
+              event.end.dateTime = `${year}-${month}-${day}T${endHourStr}:${endMinStr}:00`;
+              event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+            } else {
+              const endHour = startHour + 6;
+              const endHourStr = String(endHour).padStart(2, '0');
+              event.end.dateTime = `${year}-${month}-${day}T${endHourStr}:${minute}:00`;
+              event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+            }
+          } else {
+            // Default 17:00-23:00
+            const year = eventDate.getFullYear();
+            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+            const day = String(eventDate.getDate()).padStart(2, '0');
+
+            event.start.dateTime = `${year}-${month}-${day}T17:00:00`;
+            event.start.timeZone = config.timezone || 'Asia/Jerusalem';
+            event.end.dateTime = `${year}-${month}-${day}T23:00:00`;
+            event.end.timeZone = config.timezone || 'Asia/Jerusalem';
+          }
+
+          // Insert event
+          const calendarResponse = await calendarService.events.insert({
+            calendarId: config.calendarId,
+            resource: event
+          });
+
+          processedCount++;
+          const eventId = calendarResponse.data.id;
+
+          // Prepare Firebase tracking
+          const processedValue = shouldCancel ? "CANCELLED" : "PROCESSED";
+          let dateStr = '';
+          if (eventDate) {
+            dateStr = eventDate.toISOString().split('T')[0];
+          }
+
+          firebaseUpdates.push({
+            rowIndex: rowIndex,
+            eventId: eventId,
+            status: processedValue,
+            eventData: {
+              title: finalTitle,
+              date: dateStr,
+              location: location
+            }
+          });
+
+          console.log(`Processed row ${rowIndex + 2}: ${finalTitle}`);
+
+        } catch (rowError) {
+          console.error(`Error processing row ${rowIndex}:`, rowError);
+          errors.push({ rowIndex, error: rowError.message });
+          skippedCount++;
+        }
+      }
+
+      // Save to Firebase
+      if (firebaseUpdates.length > 0) {
+        await batchSaveEventTracking(userId, firebaseUpdates);
+      }
+
+      // Write to spreadsheet Column AL
+      console.log(`Writing ${firebaseUpdates.length} event IDs to spreadsheet...`);
+      for (const update of firebaseUpdates) {
+        try {
+          const sheetRowNum = update.rowIndex + 2;
+          await sheetService.spreadsheets.values.update({
+            spreadsheetId: config.spreadsheetId,
+            range: `${config.sheetName}!AL${sheetRowNum}`,
+            valueInputOption: "RAW",
+            resource: { values: [[update.eventId]] },
+          });
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (writeError) {
+          console.error(`Error writing event ID:`, writeError.message);
+        }
+      }
+
+      return {
+        success: true,
+        message: `Scanned ${month}/${year}: ${processedCount} events created`,
+        stats: {
+          total: rowsToProcess.length,
+          processed: processedCount,
+          skipped: skippedCount,
+          errors: errors.length
+        }
+      };
+
+    } catch (error) {
+      console.error("Error in scanMonthEvents:", error);
+      throw new functions.https.HttpsError("internal", error.message);
+    }
+  });
+
+// Delete selected events from calendar
+exports.deleteSelectedEvents = functions
+  .runWith({
+    timeoutSeconds: 300,
+    memory: '512MB'
+  })
+  .https.onCall(async (data, context) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError("unauthenticated", "Authentication required");
+    }
+
+    const email = context.auth.token.email || "";
+    if (!email.endsWith("@hakolsound.co.il")) {
+      throw new functions.https.HttpsError("permission-denied", "Only hakolsound.co.il organization members allowed");
+    }
+
+    const userId = context.auth.uid;
+
+    try {
+      const { rowIndices } = data;
+
+      if (!rowIndices || !Array.isArray(rowIndices) || rowIndices.length === 0) {
+        throw new functions.https.HttpsError("invalid-argument", "rowIndices must be a non-empty array");
+      }
+
+      console.log(`Deleting ${rowIndices.length} selected events for user ${userId}`);
+
+      // Get user configuration
+      const configDoc = await db.collection("configurations").doc(userId).get();
+      if (!configDoc.exists) {
+        throw new functions.https.HttpsError("not-found", "Configuration not found");
+      }
+
+      const config = configDoc.data();
+
+      // Setup service account
+      const jwtClient = new google.auth.JWT(
+        serviceAccount.client_email,
+        null,
+        serviceAccount.private_key,
+        ['https://www.googleapis.com/auth/calendar']
+      );
+
+      await jwtClient.authorize();
+      const calendarService = google.calendar({version: 'v3', auth: jwtClient});
+
+      // Get Firebase tracking for these rows
+      const trackingData = await getAllEventTracking(userId);
+
+      let deletedCount = 0;
+      const errors = [];
+      const deletedRowIndices = [];
+
+      for (const rowIndex of rowIndices) {
+        try {
+          const tracking = trackingData[rowIndex];
+
+          if (tracking && tracking.eventId) {
+            // Delete from calendar
+            await calendarService.events.delete({
+              calendarId: config.calendarId,
+              eventId: tracking.eventId
+            });
+
+            deletedCount++;
+            deletedRowIndices.push(rowIndex);
+            console.log(`Deleted event: ${tracking.eventId} - ${tracking.title}`);
+          } else {
+            console.log(`No tracking found for row ${rowIndex}`);
+          }
+        } catch (deleteError) {
+          console.error(`Error deleting row ${rowIndex}:`, deleteError.message);
+
+          // Still try to remove from tracking if 404
+          if (deleteError.code === 404 || deleteError.message.includes('Not Found')) {
+            deletedRowIndices.push(rowIndex);
+          }
+
+          errors.push({ rowIndex, error: deleteError.message });
+        }
+      }
+
+      // Remove from Firebase tracking
+      for (const rowIndex of deletedRowIndices) {
+        await deleteEventTracking(userId, rowIndex);
+      }
+
+      return {
+        success: true,
+        message: `Deleted ${deletedCount} of ${rowIndices.length} events`,
+        stats: {
+          requested: rowIndices.length,
+          deleted: deletedCount,
+          errors: errors.length
+        },
+        errors: errors.length > 0 ? errors : undefined
+      };
+
+    } catch (error) {
+      console.error("Error in deleteSelectedEvents:", error);
+      throw new functions.https.HttpsError("internal", error.message);
+    }
+  });
+
   // Helper function to get service account
 
-  
+// Columns mapping (shared across functions)
+const SHEET_COLUMNS = {
+  DATE: 1,          // Column B: Date (DD/MM/YY)
+  DAY: 2,           // Column C: Day of week
+  EVENT_TYPE_D: 3,  // Column D: Event Type Detail
+  EVENT_TYPE: 4,    // Column E: Event Type
+  TITLE: 5,         // Column F: Title
+  LOCATION: 6,      // Column G: Location
+  NOTES: 8,         // Column I: Notes
+  START_TIME: 9,    // Column J: Start Time
+  END_TIME: 10,     // Column K: End Time
+  MANAGER: 11,      // Column L: Manager
+  STATUS: 13,       // Column N: Status
+  EQUIPMENT_URL: 13, // Column N: Also contains hyperlink
+  TECHNICIANS: {    // Columns T-Z: Technicians
+    START: 20,      // Column T (0-based index is 19)
+    END: 26         // Column Z (0-based index is 25)
+  }
+};
+
   exports.getTimeframeEvents = functions.https.onCall(async (data, context) => {
     // Authentication checks
     if (!context.auth) {
@@ -3656,11 +4568,17 @@ exports.deleteEventsInMonth = functions
             timeMax = endOfDay(endOfWeek);
             break;
           case 'month':
-            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-            const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-            
+            // Support custom month/year from request, otherwise use current month
+            const targetMonth = (data.month !== undefined && data.month !== null) ? data.month - 1 : now.getMonth(); // month is 1-12, Date uses 0-11
+            const targetYear = data.year || now.getFullYear();
+
+            const startOfMonth = new Date(targetYear, targetMonth, 1);
+            const endOfMonth = new Date(targetYear, targetMonth + 1, 0);
+
             timeMin = startOfDay(startOfMonth);
             timeMax = endOfDay(endOfMonth);
+
+            console.log(`Using month ${targetMonth + 1}/${targetYear} for date range`);
             break;
           default:
             // Invalid timeframe, use default (today)
@@ -3727,7 +4645,12 @@ exports.deleteEventsInMonth = functions
           // Process the data (simplified for now)
           const rows = response.data.values || [];
           console.log(`Found ${rows.length} rows of data`);
-          
+
+          // Get Firebase tracking data for this user
+          console.log('Loading event tracking data from Firebase...');
+          const trackingData = await getAllEventTracking(userId);
+          console.log(`Loaded tracking for ${Object.keys(trackingData).length} events`);
+
           // Always explicitly construct and log the response
           // Add this code to your function to process the events from the sheet
 
@@ -3907,16 +4830,21 @@ if (rowsNeedingHyperlinks.length > 0) {
     // Continue without hyperlinks if there's an error
   }
 }
-  const shouldCancel = row.length > 18 && (row[18] === true || row[18] === "true" || row[18] === "TRUE");
-  const rawTitle = row.length > COLUMNS.TITLE ? (row[COLUMNS.TITLE] || '') : '';
-
   // Now process all relevant rows and build the events array
   relevantRows.forEach(({ rowIndex, row, eventDate, day, month, year, fullYear, eventTypeD }) => {
   // Format date for display (DD/MM/YY)
   const formattedDate = `${day.toString().padStart(2, '0')}/${(month+1).toString().padStart(2, '0')}/${year < 100 ? year : year % 100}`;
-  
+
+  // Check if event should be marked as canceled
+  const shouldCancel = row.length > 18 && (row[18] === true || row[18] === "true" || row[18] === "TRUE");
+  const rawTitle = row.length > COLUMNS.TITLE ? (row[COLUMNS.TITLE] || '') : '';
+
+  // Get tracking info from Firebase for this row
+  const tracking = trackingData[rowIndex];
+
   // Create event object with all fields properly extracted
   const event = {
+    rowIndex: rowIndex, // Add row index for frontend reference
     date: formattedDate,
     day: row.length > COLUMNS.DAY ? (row[COLUMNS.DAY] || '') : '',
     eventType: row.length > COLUMNS.EVENT_TYPE ? (row[COLUMNS.EVENT_TYPE] || '') : '',
@@ -3929,9 +4857,13 @@ if (rowsNeedingHyperlinks.length > 0) {
     endTime: row.length > COLUMNS.END_TIME ? (row[COLUMNS.END_TIME] || '') : '',
     manager: row.length > COLUMNS.MANAGER ? (row[COLUMNS.MANAGER] || '') : '',
     equipmentListUrl: hyperlinks[rowIndex] || '',
-    technicians: extractTechnicians(row)
+    technicians: extractTechnicians(row),
+    // Add Firebase tracking data
+    eventId: tracking?.eventId || null,
+    syncStatus: tracking?.status || null,
+    lastSync: tracking?.lastSync ? tracking.lastSync.toDate() : null
   };
-  
+
   events.push(event);
 
  

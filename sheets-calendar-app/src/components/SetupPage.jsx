@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { getFirestore, collection, doc, getDoc, deleteDoc } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
+import useAuthStore from '../store/authStore';
 
-function SetupPage({ user }) {
+function SetupPage() {
+  const { user } = useAuthStore();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
